@@ -3,8 +3,8 @@ import random
 import string
 from contextlib import suppress
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
+from zoneinfo import ZoneInfo
 
-import pytz
 from django.core.cache import cache
 from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import models
@@ -142,7 +142,6 @@ class AutomatedTask(BaseAuditModel):
         return self.name
 
     def save(self, *args, **kwargs) -> None:
-
         # if task is a policy task clear cache on everything
         if self.policy:
             cache.delete_many_pattern("site_*_tasks")
@@ -168,7 +167,6 @@ class AutomatedTask(BaseAuditModel):
                         )
 
     def delete(self, *args, **kwargs):
-
         # if task is a policy task clear cache on everything
         if self.policy:
             cache.delete_many_pattern("site_*_tasks")
@@ -272,12 +270,12 @@ class AutomatedTask(BaseAuditModel):
                 and self.task_type == TaskType.RUN_ONCE
                 and self.run_asap_after_missed
                 and agent
-                and self.run_time_date
-                < djangotime.now().astimezone(pytz.timezone(agent.timezone))
+                and self.run_time_date.replace(tzinfo=ZoneInfo(agent.timezone))
+                < djangotime.now().astimezone(ZoneInfo(agent.timezone))
             ):
                 self.run_time_date = (
                     djangotime.now() + djangotime.timedelta(minutes=5)
-                ).astimezone(pytz.timezone(agent.timezone))
+                ).astimezone(ZoneInfo(agent.timezone))
 
             task["start_year"] = int(self.run_time_date.strftime("%Y"))
             task["start_month"] = int(self.run_time_date.strftime("%-m"))
@@ -312,7 +310,6 @@ class AutomatedTask(BaseAuditModel):
                 task["days_of_week"] = self.run_time_bit_weekdays
 
             elif self.task_type == TaskType.MONTHLY:
-
                 # check if "last day is configured"
                 if self.monthly_days_of_month >= 0x80000000:
                     task["days_of_month"] = self.monthly_days_of_month - 0x80000000
@@ -527,7 +524,6 @@ class TaskResult(models.Model):
         )
 
     def save_collector_results(self) -> None:
-
         agent_field = self.task.custom_field.get_or_create_field_value(self.agent)
 
         value = (

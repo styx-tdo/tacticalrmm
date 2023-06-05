@@ -1,4 +1,13 @@
 ---
+- name: Append subdomains to hosts
+  tags: hosts
+  become: yes
+  ansible.builtin.lineinfile:
+    path: /etc/hosts
+    backrefs: yes
+    regexp: '^(127\.0\.1\.1 .*)$'
+    line: "\\1 {{ api }} {{ mesh }} {{ rmm }}"
+
 - name: set mouse mode for vim
   tags: vim
   become: yes
@@ -407,7 +416,7 @@
   tags: pip
   ansible.builtin.shell:
     chdir: "{{ backend_dir }}/api"
-    cmd: python3.10 -m venv env
+    cmd: python3.11 -m venv env
 
 - name: update pip to latest
   tags: pip

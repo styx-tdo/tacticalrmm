@@ -6,19 +6,12 @@ import time
 from io import StringIO
 from pathlib import Path
 
-from core.utils import (
-    get_core_settings,
-    get_mesh_ws_url,
-    remove_mesh_agent,
-    token_is_valid,
-)
 from django.conf import settings
 from django.db.models import Exists, OuterRef, Prefetch, Q
 from django.http import HttpResponse
 from django.shortcuts import get_object_or_404
 from django.utils import timezone as djangotime
 from django.utils.dateparse import parse_datetime
-from logs.models import AuditLog, DebugLog, PendingAction
 from meshctrl.utils import get_login_token
 from packaging import version as pyver
 from rest_framework import serializers
@@ -27,8 +20,17 @@ from rest_framework.exceptions import PermissionDenied
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
+
+from core.utils import (
+    get_core_settings,
+    get_mesh_ws_url,
+    remove_mesh_agent,
+    token_is_valid,
+    wake_on_lan,
+)
+from logs.models import AuditLog, DebugLog, PendingAction
 from scripts.models import Script
-from scripts.tasks import handle_bulk_command_task, handle_bulk_script_task
+from scripts.tasks import bulk_command_task, bulk_script_task
 from tacticalrmm.constants import (
     AGENT_DEFER,
     AGENT_STATUS_OFFLINE,
@@ -49,7 +51,7 @@ from tacticalrmm.permissions import (
     _has_perm_on_site,
 )
 from tacticalrmm.utils import get_default_timezone, reload_nats
-from winupdate.models import WinUpdate
+from winupdate.models import WinUpdate, WinUpdatePolicy
 from winupdate.serializers import WinUpdatePolicySerializer
 from winupdate.tasks import bulk_check_for_updates_task, bulk_install_updates_task
 
@@ -58,6 +60,7 @@ from .permissions import (
     AgentHistoryPerms,
     AgentNotesPerms,
     AgentPerms,
+    AgentWOLPerms,
     EvtLogPerms,
     InstallAgentPerms,
     ManageProcPerms,
@@ -134,6 +137,10 @@ class GetAgents(APIView):
                         "checkresults",
                         queryset=CheckResult.objects.select_related("assigned_check"),
                     ),
+                    Prefetch(
+                        "custom_fields",
+                        queryset=AgentCustomField.objects.select_related("field"),
+                    ),
                 )
                 .annotate(
                     has_patches_pending=Exists(
@@ -183,7 +190,36 @@ class GetUpdateDeleteAgent(APIView):
 
     # get agent details
     def get(self, request, agent_id):
-        agent = get_object_or_404(Agent, agent_id=agent_id)
+        from checks.models import Check, CheckResult
+
+        agent = get_object_or_404(
+            Agent.objects.select_related(
+                "site__server_policy",
+                "site__workstation_policy",
+                "site__client__server_policy",
+                "site__client__workstation_policy",
+                "policy",
+                "alert_template",
+            ).prefetch_related(
+                Prefetch(
+                    "agentchecks",
+                    queryset=Check.objects.select_related("script"),
+                ),
+                Prefetch(
+                    "checkresults",
+                    queryset=CheckResult.objects.select_related("assigned_check"),
+                ),
+                Prefetch(
+                    "custom_fields",
+                    queryset=AgentCustomField.objects.select_related("field"),
+                ),
+                Prefetch(
+                    "winupdatepolicy",
+                    queryset=WinUpdatePolicy.objects.select_related("agent", "policy"),
+                ),
+            ),
+            agent_id=agent_id,
+        )
         return Response(AgentSerializer(agent).data)
 
     # edit agent
@@ -203,9 +239,7 @@ class GetUpdateDeleteAgent(APIView):
             p_serializer.save()
 
         if "custom_fields" in request.data.keys():
-
             for field in request.data["custom_fields"]:
-
                 custom_field = field
                 custom_field["agent"] = agent.pk
 
@@ -530,10 +564,18 @@ class Reboot(APIView):
 @api_view(["POST"])
 @permission_classes([IsAuthenticated, InstallAgentPerms])
 def install_agent(request):
+    from knox.models import AuthToken
+
     from accounts.models import User
     from agents.utils import get_agent_url
     from core.utils import token_is_valid
-    from knox.models import AuthToken
+
+    # TODO rework this ghetto validation hack
+    # https://github.com/amidaware/tacticalrmm/issues/1461
+    try:
+        int(request.data["expires"])
+    except ValueError:
+        return notify_error("Please enter a valid number of hours")
 
     client_id = request.data["client"]
     site_id = request.data["site"]
@@ -548,7 +590,7 @@ def install_agent(request):
 
     if request.data["installMethod"] in {"bash", "mac"} and not is_valid:
         return notify_error(
-            "Missing code signing token, or token is no longer valid. Please read the docs for more info."
+            "Linux/Mac agents require code signing. Please see https://docs.tacticalrmm.com/code_signing/ for more info."
         )
 
     inno = f"tacticalagent-v{version}-{plat}-{goarch}"
@@ -560,7 +602,7 @@ def install_agent(request):
     installer_user = User.objects.filter(is_installer_user=True).first()
 
     _, token = AuthToken.objects.create(
-        user=installer_user, expiry=dt.timedelta(hours=request.data["expires"])
+        user=installer_user, expiry=dt.timedelta(hours=int(request.data["expires"]))
     )
 
     install_flags = [
@@ -595,7 +637,6 @@ def install_agent(request):
         )
 
     elif request.data["installMethod"] == "bash":
-
         from agents.utils import generate_linux_install
 
         return generate_linux_install(
@@ -645,7 +686,6 @@ def install_agent(request):
         return Response(resp)
 
     elif request.data["installMethod"] == "powershell":
-
         text = Path(settings.BASE_DIR / "core" / "installer.ps1").read_text()
 
         replace_dict = {
@@ -739,6 +779,7 @@ def run_script(request, agent_id):
             nats_timeout=req_timeout,
             emails=emails,
             args=args,
+            history_pk=history_pk,
             run_as_user=run_as_user,
             env_vars=env_vars,
         )
@@ -910,7 +951,7 @@ def bulk(request):
     agents: list[int] = [agent.pk for agent in q]
 
     if not agents:
-        return notify_error("No agents where found meeting the selected criteria")
+        return notify_error("No agents were found meeting the selected criteria")
 
     AuditLog.audit_bulk_action(
         request.user,
@@ -925,31 +966,32 @@ def bulk(request):
         else:
             shell = request.data["shell"]
 
-        handle_bulk_command_task.delay(
-            agents,
-            request.data["cmd"],
-            shell,
-            request.data["timeout"],
-            request.user.username[:50],
-            request.data["run_as_user"],
+        bulk_command_task.delay(
+            agent_pks=agents,
+            cmd=request.data["cmd"],
+            shell=shell,
+            timeout=request.data["timeout"],
+            username=request.user.username[:50],
+            run_as_user=request.data["run_as_user"],
         )
         return Response(f"Command will now be run on {len(agents)} agents")
 
     elif request.data["mode"] == "script":
         script = get_object_or_404(Script, pk=request.data["script"])
-        handle_bulk_script_task.delay(
-            script.pk,
-            agents,
-            request.data["args"],
-            request.data["timeout"],
-            request.user.username[:50],
-            request.data["run_as_user"],
-            request.data["env_vars"],
+
+        bulk_script_task.delay(
+            script_pk=script.pk,
+            agent_pks=agents,
+            args=request.data["args"],
+            timeout=request.data["timeout"],
+            username=request.user.username[:50],
+            run_as_user=request.data["run_as_user"],
+            env_vars=request.data["env_vars"],
         )
+
         return Response(f"{script.name} will now be run on {len(agents)} agents")
 
     elif request.data["mode"] == "patch":
-
         if request.data["patchMode"] == "install":
             bulk_install_updates_task.delay(agents)
             return Response(
@@ -965,7 +1007,6 @@ def bulk(request):
 @api_view(["POST"])
 @permission_classes([IsAuthenticated, AgentPerms])
 def agent_maintenance(request):
-
     if request.data["type"] == "Client":
         if not _has_perm_on_client(request.user, request.data["id"]):
             raise PermissionDenied()
@@ -1051,7 +1092,6 @@ class ScriptRunHistory(APIView):
             read_only_fields = fields
 
     def get(self, request):
-
         date_range_filter = Q()
         script_name_filter = Q()
 
@@ -1123,3 +1163,18 @@ class ScriptRunHistory(APIView):
 
         ret = self.OutputSerializer(hists, many=True).data
         return Response(ret)
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated, AgentWOLPerms])
+def wol(request, agent_id):
+    agent = get_object_or_404(
+        Agent.objects.defer(*AGENT_DEFER),
+        agent_id=agent_id,
+    )
+    try:
+        uri = get_mesh_ws_url()
+        asyncio.run(wake_on_lan(uri=uri, mesh_node_id=agent.mesh_node_id))
+    except Exception as e:
+        return notify_error(str(e))
+    return Response(f"Wake-on-LAN sent to {agent.hostname}")

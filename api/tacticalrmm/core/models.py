@@ -98,6 +98,10 @@ class CoreSettings(BaseAuditModel):
     date_format = models.CharField(
         max_length=30, blank=True, default="MMM-DD-YYYY - HH:mm"
     )
+    open_ai_token = models.CharField(max_length=255, null=True, blank=True)
+    open_ai_model = models.CharField(
+        max_length=255, blank=True, default="gpt-3.5-turbo"
+    )
 
     def save(self, *args, **kwargs) -> None:
         from alerts.tasks import cache_agents_alert_template
@@ -272,7 +276,6 @@ class CoreSettings(BaseAuditModel):
 
 
 class CustomField(BaseAuditModel):
-
     order = models.PositiveIntegerField(default=0)
     model = models.CharField(max_length=25, choices=CustomFieldModel.choices)
     type = models.CharField(

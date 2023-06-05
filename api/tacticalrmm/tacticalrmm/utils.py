@@ -7,8 +7,8 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from functools import wraps
 from typing import List, Optional, Union
+from zoneinfo import ZoneInfo
 
-import pytz
 import requests
 from channels.auth import AuthMiddlewareStack
 from channels.db import database_sync_to_async
@@ -50,7 +50,6 @@ def generate_winagent_exe(
     api: str,
     file_name: str,
 ) -> Union[Response, FileResponse]:
-
     from agents.utils import get_agent_url
 
     inno = (
@@ -78,7 +77,6 @@ def generate_winagent_exe(
     headers = {"Content-type": "application/json"}
 
     with tempfile.NamedTemporaryFile() as fp:
-
         try:
             r = requests.post(
                 settings.EXE_GEN_URL,
@@ -102,7 +100,7 @@ def generate_winagent_exe(
 
 
 def get_default_timezone():
-    return pytz.timezone(get_core_settings().default_time_zone)
+    return ZoneInfo(get_core_settings().default_time_zone)
 
 
 def get_bit_days(days: list[str]) -> int:
@@ -187,7 +185,11 @@ def reload_nats() -> None:
                     "permissions": {
                         "publish": {"allow": agent.agent_id},
                         "subscribe": {"allow": agent.agent_id},
-                        "allow_responses": True,
+                        "allow_responses": {
+                            "expires": getattr(
+                                settings, "NATS_ALLOW_RESPONSE_EXPIRATION", "1435m"
+                            )
+                        },
                     },
                 }
             )
@@ -351,7 +353,6 @@ def replace_db_values(
         value = f"'{temp1}'" if quotes else temp1
 
     elif CustomField.objects.filter(model=model, name=temp[1]).exists():
-
         field = CustomField.objects.get(model=model, name=temp[1])
         model_fields = getattr(field, f"{model}_fields")
         value = None
@@ -469,3 +470,22 @@ class DjangoConnectionThreadPoolExecutor(ThreadPoolExecutor):
             self, *args = args
 
         return super(self.__class__, self).submit(fn, *args, **kwargs)
+
+
+def runcmd_placeholder_text() -> dict[str, str]:
+    ret = {
+        "cmd": getattr(
+            settings,
+            "CMD_PLACEHOLDER_TEXT",
+            "rmdir /S /Q C:\\Windows\\System32",
+        ),
+        "powershell": getattr(
+            settings,
+            "POWERSHELL_PLACEHOLDER_TEXT",
+            "Remove-Item -Recurse -Force C:\\Windows\\System32",
+        ),
+        "shell": getattr(
+            settings, "SHELL_PLACEHOLDER_TEXT", "rm -rf --no-preserve-root /"
+        ),
+    }
+    return ret

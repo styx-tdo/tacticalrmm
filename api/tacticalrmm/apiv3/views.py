@@ -41,13 +41,12 @@ from tacticalrmm.constants import (
     MeshAgentIdent,
     PAStatus,
 )
-from tacticalrmm.helpers import notify_error
+from tacticalrmm.helpers import make_random_password, notify_error
 from tacticalrmm.utils import reload_nats
 from winupdate.models import WinUpdate, WinUpdatePolicy
 
 
 class CheckIn(APIView):
-
     authentication_classes = [TokenAuthentication]
     permission_classes = [IsAuthenticated]
 
@@ -365,7 +364,6 @@ class TaskRunner(APIView):
         # check if task is a collector and update the custom field
         if task.custom_field:
             if not task_result.stderr:
-
                 task_result.save_collector_results()
 
                 status = CheckStatus.PASSING
@@ -459,7 +457,7 @@ class NewAgent(APIView):
         user = User.objects.create_user(  # type: ignore
             username=request.data["agent_id"],
             agent=agent,
-            password=User.objects.make_random_password(60),  # type: ignore
+            password=make_random_password(len=60),
         )
 
         token = Token.objects.create(user=user)

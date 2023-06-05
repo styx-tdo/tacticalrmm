@@ -3,8 +3,8 @@ import os
 from itertools import cycle
 from typing import TYPE_CHECKING
 from unittest.mock import patch
+from zoneinfo import ZoneInfo
 
-import pytz
 from django.conf import settings
 from django.utils import timezone as djangotime
 from model_bakery import baker
@@ -573,12 +573,14 @@ class TestAgentViews(TacticalTestCase):
         }
         r = self.client.post(url, data, format="json")
         self.assertEqual(r.status_code, 200)
+        hist = AgentHistory.objects.filter(agent=self.agent, script=script).last()
         email_task.assert_called_with(
             agentpk=self.agent.pk,
             scriptpk=script.pk,
             nats_timeout=18,
             emails=[],
             args=["abc", "123"],
+            history_pk=hist.pk,
             run_as_user=False,
             env_vars=["hello=world", "foo=bar"],
         )
@@ -588,12 +590,14 @@ class TestAgentViews(TacticalTestCase):
         data["emailMode"] = "custom"
         r = self.client.post(url, data, format="json")
         self.assertEqual(r.status_code, 200)
+        hist = AgentHistory.objects.filter(agent=self.agent, script=script).last()
         email_task.assert_called_with(
             agentpk=self.agent.pk,
             scriptpk=script.pk,
             nats_timeout=18,
             emails=["admin@example.com", "bob@example.com"],
             args=["abc", "123"],
+            history_pk=hist.pk,
             run_as_user=False,
             env_vars=["hello=world", "foo=bar"],
         )
@@ -851,7 +855,6 @@ class TestAgentViews(TacticalTestCase):
         self.check_not_authenticated("delete", url)
 
     def test_get_agent_history(self):
-
         # setup data
         agent = baker.make_recipe("agents.agent")
         history = baker.make("agents.AgentHistory", agent=agent, _quantity=30)
@@ -863,7 +866,7 @@ class TestAgentViews(TacticalTestCase):
 
         # test pulling data
         r = self.client.get(url, format="json")
-        ctx = {"default_tz": pytz.timezone("America/Los_Angeles")}
+        ctx = {"default_tz": ZoneInfo("America/Los_Angeles")}
         data = AgentHistorySerializer(history, many=True, context=ctx).data
         self.assertEqual(r.status_code, 200)
         self.assertEqual(r.data, data)  # type:ignore
@@ -1007,7 +1010,6 @@ class TestAgentPermissions(TacticalTestCase):
     @patch("time.sleep")
     @patch("agents.models.Agent.nats_cmd", return_value="ok")
     def test_agent_actions_permissions(self, nats_cmd, sleep):
-
         agent = baker.make_recipe("agents.agent")
         unauthorized_agent = baker.make_recipe("agents.agent")
 
@@ -1135,7 +1137,6 @@ class TestAgentPermissions(TacticalTestCase):
         self.assertEqual(len(response.data["agents"]), 7)
 
     def test_generating_agent_installer_permissions(self):
-
         client = baker.make("clients.Client")
         client_site = baker.make("clients.Site", client=client)
         site = baker.make("clients.Site")
@@ -1198,7 +1199,6 @@ class TestAgentPermissions(TacticalTestCase):
         self.check_not_authorized("post", url, data)
 
     def test_agent_notes_permissions(self):
-
         agent = baker.make_recipe("agents.agent")
         notes = baker.make("agents.Note", agent=agent, _quantity=5)
 

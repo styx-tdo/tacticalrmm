@@ -142,6 +142,20 @@ async def send_command_with_mesh(
         )
 
 
+async def wake_on_lan(*, uri: str, mesh_node_id: str) -> None:
+    node_id = _b64_to_hex(mesh_node_id)
+    async with websockets.connect(uri) as ws:
+        await ws.send(
+            json.dumps(
+                {
+                    "action": "wakedevices",
+                    "nodeids": [f"node//{node_id}"],
+                    "responseid": "trmm",
+                }
+            )
+        )
+
+
 async def remove_mesh_agent(uri: str, mesh_node_id: str) -> None:
     node_id = _b64_to_hex(mesh_node_id)
     async with websockets.connect(uri) as ws:
@@ -165,7 +179,6 @@ def sysd_svc_is_running(svc: str) -> bool:
 def get_meshagent_url(
     *, ident: "MeshAgentIdent", plat: str, mesh_site: str, mesh_device_id: str
 ) -> str:
-
     if settings.DOCKER_BUILD:
         base = settings.MESH_WS_URL.replace("ws://", "http://")
     else:

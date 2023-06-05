@@ -2,7 +2,6 @@ import asyncio
 import re
 from collections import Counter
 from contextlib import suppress
-from distutils.version import LooseVersion
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence, Union, cast
 
 import msgpack
@@ -16,6 +15,7 @@ from django.db import models
 from django.utils import timezone as djangotime
 from nats.errors import TimeoutError
 from packaging import version as pyver
+from packaging.version import Version as LooseVersion
 
 from agents.utils import get_agent_url
 from checks.models import CheckResult
@@ -408,6 +408,16 @@ class Agent(BaseAuditModel):
         except:
             return ["unknown disk"]
 
+    @property
+    def serial_number(self) -> str:
+        if self.is_posix:
+            return ""
+
+        try:
+            return self.wmi_detail["bios"][0][0]["SerialNumber"]
+        except:
+            return ""
+
     @classmethod
     def online_agents(cls, min_version: str = "") -> "List[Agent]":
         if min_version:
@@ -430,7 +440,6 @@ class Agent(BaseAuditModel):
     def get_checks_with_policies(
         self, exclude_overridden: bool = False
     ) -> "List[Check]":
-
         if exclude_overridden:
             checks = (
                 list(
@@ -445,12 +454,10 @@ class Agent(BaseAuditModel):
         return self.add_check_results(checks)
 
     def get_tasks_with_policies(self) -> "List[AutomatedTask]":
-
         tasks = list(self.autotasks.all()) + self.get_tasks_from_policies()
         return self.add_task_results(tasks)
 
     def add_task_results(self, tasks: "List[AutomatedTask]") -> "List[AutomatedTask]":
-
         results = self.taskresults.all()  # type: ignore
 
         for task in tasks:
@@ -462,7 +469,6 @@ class Agent(BaseAuditModel):
         return tasks
 
     def add_check_results(self, checks: "List[Check]") -> "List[Check]":
-
         results = self.checkresults.all()  # type: ignore
 
         for check in checks:
@@ -524,7 +530,6 @@ class Agent(BaseAuditModel):
         # determine if any agent checks have a custom interval and set the lowest interval
         for check in self.get_checks_with_policies():
             if check.run_interval and check.run_interval < interval:
-
                 # don't allow check runs less than 15s
                 interval = 15 if check.run_interval < 15 else check.run_interval
 
@@ -542,7 +547,6 @@ class Agent(BaseAuditModel):
         run_as_user: bool = False,
         env_vars: list[str] = [],
     ) -> Any:
-
         from scripts.models import Script
 
         script = Script.objects.get(pk=scriptpk)
@@ -799,7 +803,6 @@ class Agent(BaseAuditModel):
     async def nats_cmd(
         self, data: Dict[Any, Any], timeout: int = 30, wait: bool = True
     ) -> Any:
-
         opts = setup_nats_options()
         try:
             nc = await nats.connect(**opts)
@@ -883,8 +886,10 @@ class Agent(BaseAuditModel):
                 # extract the version from the title and sort from oldest to newest
                 # skip if no version info is available therefore nothing to parse
                 try:
+                    matches = r"(Version|Versão)"
+                    pattern = r"\(" + matches + r"(.*?)\)"
                     vers = [
-                        re.search(r"\(Version(.*?)\)", i).group(1).strip()
+                        re.search(pattern, i, flags=re.IGNORECASE).group(2).strip()
                         for i in titles
                     ]
                     sorted_vers = sorted(vers, key=LooseVersion)
